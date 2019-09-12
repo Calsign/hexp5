@@ -68,6 +68,7 @@ module Hex : Sketch = struct
   end
 
   module Coord_map = Map.Make (Coord)
+  module Coord_set = Set.Make (Coord)
 
   type move = {
     x : int;
@@ -82,6 +83,7 @@ module Hex : Sketch = struct
     undo : move list;
     redo : move list;
     turn : chip;
+    winner : chip option;
   }
 
   let next_turn = function
@@ -96,6 +98,7 @@ module Hex : Sketch = struct
     undo = [];
     redo = [];
     turn = CWhite;
+    winner = None;
   }
 
   let white = gray 255
@@ -158,7 +161,12 @@ module Hex : Sketch = struct
         hex m xf yf |> fill color
     end (positions m) |> group |> stroke untaken_border
 
-  let borders conf =
+  let borders conf winner =
+    let col_black, col_white =
+      match winner with
+      | Some CWhite -> black_border, white
+      | Some CBlack -> black, white_border
+      | None -> black_border, white_border in
     let center = (~.(conf.width), ~.(conf.height)) // 2. in
     let reach = ~.(max conf.width conf.height) *. 2. in
     let theta_tl = pi *. 4. /. 3. in
@@ -168,49 +176,100 @@ module Hex : Sketch = struct
     let build_vec theta = with_mag (of_angle theta) reach in
     group [
       triangle center (center ++ build_vec theta_tl)
-        (center ++ build_vec theta_bl) |> fill black_border;
+        (center ++ build_vec theta_bl) |> fill col_black;
       triangle center (center ++ build_vec theta_tr)
-        (center ++ build_vec theta_br) |> fill black_border;
+        (center ++ build_vec theta_br) |> fill col_black;
       triangle center (center ++ build_vec theta_tl)
-        (center ++ build_vec theta_tr) |> fill white_border;
+        (center ++ build_vec theta_tr) |> fill col_white;
       triangle center (center ++ build_vec theta_bl)
-        (center ++ build_vec theta_br) |> fill white_border;
+        (center ++ build_vec theta_br) |> fill col_white;
     ] |> no_stroke
 
   let draw conf st =
     group [
-      borders conf;
+      borders conf st.winner;
       board st.measure st.chip_map;
     ]
 
-  let place_chip st chip x y = {
-    st with
-    chip_map = Coord_map.add (x, y) chip st.chip_map;
-    undo = {x; y; chip; prev_turn = st.turn} :: st.undo;
-    redo = [];
-  }
+  let border_coords n (x, y) =
+    [(x + 1, y); (x, y + 1); (x - 1, y + 1); (x - 1, y); (x, y - 1); (x + 1, y - 1)]
+    |> List.filter (fun (x', y') -> x' >= 0 && y' >= 0 && x' < n && y < n)
+
+  (* DFS *)
+  let rec is_connected (n : int) (chip : chip) (chip_map : chip Coord_map.t)
+      (target : Coord_set.t) (visited : Coord_set.t) (start : int * int) =
+    let visited' = Coord_set.add start visited in
+    (* make sure we're starting from correct-colored tile *)
+    if Coord_map.find_opt start chip_map <> Some chip then false, visited'
+    (* are we there yet? *)
+    else if Coord_set.mem start target then true, visited'
+    else begin
+      let borders = border_coords n start in
+      let valid = borders |> List.filter
+                    (* adjacent tiles must be unvisited and correctly-colored *)
+                    (fun c -> (not (Coord_set.mem c visited'))
+                              && Coord_map.find_opt c chip_map = Some chip) in
+      List.fold_left
+        (fun (ret, visited'') c ->
+           if ret then true, visited''
+           else is_connected n chip chip_map target visited'' c)
+        (false, visited') valid
+    end
+
+  let is_connected_list (n : int) (chip : chip) (chip_map : chip Coord_map.t)
+      (target : Coord_set.t) (starts : (int * int) list) =
+    List.fold_left
+      (fun (ret, visited') c ->
+         if ret then true, visited'
+         else is_connected n chip chip_map target visited' c)
+      (false, Coord_set.empty) starts
+
+  let winner_of_chip_map n chip_map =
+    let black_start = List.init n (fun y -> 0, y) in
+    let black_target = List.init n (fun y -> n - 1, y) |> Coord_set.of_list in
+    let white_start = List.init n (fun x -> x, 0) in
+    let white_target = List.init n (fun x -> x, n - 1) |> Coord_set.of_list in
+    let black_connected, _ = is_connected_list n CBlack chip_map black_target black_start in
+    let white_connected, _ = is_connected_list n CWhite chip_map white_target white_start in
+    if black_connected then Some CBlack
+    else if white_connected then Some CWhite
+    else None
+
+  let place_chip st chip x y =
+    let chip_map = Coord_map.add (x, y) chip st.chip_map in
+    {
+      st with
+      chip_map;
+      undo = {x; y; chip; prev_turn = st.turn} :: st.undo;
+      redo = [];
+      winner = winner_of_chip_map st.measure.n chip_map;
+    }
 
   let undo st =
     match st.undo with
     | ({x; y; chip; prev_turn} as move) :: tl ->
+      let chip_map = Coord_map.remove (x, y) st.chip_map in
       {
         st with
-        chip_map = Coord_map.remove (x, y) st.chip_map;
+        chip_map;
         undo = tl;
         redo = move :: st.redo;
         turn = prev_turn;
+        winner = winner_of_chip_map st.measure.n chip_map;
       }
     | [] -> st
 
   let redo st =
     match st.redo with
     | ({x; y; chip; prev_turn} as move) :: tl ->
+      let chip_map = Coord_map.add (x, y) chip st.chip_map in
       {
         st with
-        chip_map = Coord_map.add (x, y) chip st.chip_map;
+        chip_map;
         undo = move :: st.undo;
         redo = tl;
         turn = next_turn prev_turn;
+        winner = winner_of_chip_map st.measure.n chip_map;
       }
     | [] -> st
 
