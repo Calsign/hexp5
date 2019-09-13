@@ -327,8 +327,7 @@ module Hex : Sketch = struct
 
   let key_pressed conf st =
     match conf.key_unicode with
-    | k when k = KeyUnicode.backspace
-          || k = KeyUnicode.left -> undo st
+    | k when k = KeyUnicode.left -> undo st
     | k when k = KeyUnicode.right -> redo st
     | k when k = Uchar.of_char 'b' ->
       {st with mode = Place CBlack}
@@ -344,6 +343,11 @@ module Hex : Sketch = struct
       {st with mode}
     | k when is_number k ->
       {st with n_buffer = st.n_buffer ^ (Uchar.to_char k |> String.make 1)}
+    | k when k = KeyUnicode.backspace ->
+      if String.length st.n_buffer > 0
+      then {st with n_buffer = String.sub st.n_buffer 0
+                        (String.length st.n_buffer - 1)}
+      else st
     | k when k = KeyUnicode.enter ->
       begin
         match st.n_buffer |> int_of_string_opt with
