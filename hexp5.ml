@@ -3,7 +3,7 @@ open P5.Gtkc
 open Math
 open Vector
 
-let default_n = 5
+let default_n = 14
 
 module Hex : Sketch = struct
   include Base
@@ -26,6 +26,8 @@ module Hex : Sketch = struct
     hex_height : float;
     hex_int_height : float;
     hex_ext_height : float;
+
+    positions : (int * int) list;
   }
 
   let build_measure n conf =
@@ -56,6 +58,7 @@ module Hex : Sketch = struct
       theta;
       hex_width; hex_half_width;
       hex_height; hex_int_height; hex_ext_height;
+      positions = List.init n (fun x -> List.init n (fun y -> (x, y))) |> List.flatten;
     }
 
   type chip = CWhite | CBlack | CGray
@@ -88,6 +91,7 @@ module Hex : Sketch = struct
     redo : move list;
     mode : mode;
     winner : chip option;
+    n_buffer : string;
   }
 
   let next_turn = function
@@ -97,14 +101,18 @@ module Hex : Sketch = struct
 
   let display = `Size (1200, 800)
 
-  let setup conf = {
-    measure = build_measure default_n conf;
+  let build_state n conf = {
+    measure = build_measure n conf;
     chip_map = Coord_map.empty;
     undo = [];
     redo = [];
     mode = Game CWhite;
     winner = None;
+    n_buffer = "";
   }
+
+  let setup conf =
+    build_state default_n conf
 
   let white = gray 255
   let black = gray 0
@@ -154,9 +162,6 @@ module Hex : Sketch = struct
     if hx >= 0 && hx < m.n && hy >= 0 && hy < m.n
     then Some (hx, hy) else None
 
-  let positions (m : measure) =
-    List.init m.n (fun x -> List.init m.n (fun y -> (x, y))) |> List.flatten
-
   let board (m : measure) chip_map =
     List.map begin
       fun (x, y) ->
@@ -165,7 +170,7 @@ module Hex : Sketch = struct
           | Some chip -> color_of_chip chip
           | None -> untaken in
         hex m xf yf |> fill color
-    end (positions m) |> group |> stroke untaken_border
+    end m.positions |> group |> stroke untaken_border
 
   let borders conf winner =
     let col_black, col_white =
@@ -316,6 +321,10 @@ module Hex : Sketch = struct
     (* mouse was pressed outside board *)
     | None -> st
 
+  let is_number c =
+    Uchar.to_int c >= (Uchar.of_char '0' |> Uchar.hash)
+    && Uchar.to_int c <= (Uchar.of_char '9' |> Uchar.hash)
+
   let key_pressed conf st =
     match conf.key_unicode with
     | k when k = KeyUnicode.backspace
@@ -330,8 +339,17 @@ module Hex : Sketch = struct
     | k when k = Uchar.of_char 'g' ->
       let mode = match st.mode with
         | Game chip -> Game chip
+        | Place CGray -> Game CWhite
         | Place chip -> Game chip in
       {st with mode}
+    | k when is_number k ->
+      {st with n_buffer = st.n_buffer ^ (Uchar.to_char k |> String.make 1)}
+    | k when k = KeyUnicode.enter ->
+      begin
+        match st.n_buffer |> int_of_string_opt with
+        | Some n -> build_state n conf
+        | None -> {st with n_buffer = ""}
+      end
     | _ -> st
 
   let window_resized conf st =
