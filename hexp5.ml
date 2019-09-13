@@ -3,7 +3,7 @@ open P5.Gtkc
 open Math
 open Vector
 
-let default_n = 14
+let default_n = 5
 
 module Hex : Sketch = struct
   include Base
@@ -58,7 +58,7 @@ module Hex : Sketch = struct
       hex_height; hex_int_height; hex_ext_height;
     }
 
-  type chip = CWhite | CBlack
+  type chip = CWhite | CBlack | CGray
 
   module Coord = struct
     type t = int * int
@@ -77,18 +77,23 @@ module Hex : Sketch = struct
     prev_turn : chip;
   }
 
+  type mode =
+    | Game of chip
+    | Place of chip
+
   type state = {
     measure : measure;
     chip_map : chip Coord_map.t;
     undo : move list;
     redo : move list;
-    turn : chip;
+    mode : mode;
     winner : chip option;
   }
 
   let next_turn = function
     | CWhite -> CBlack
     | CBlack -> CWhite
+    | CGray -> CGray
 
   let display = `Size (1200, 800)
 
@@ -97,7 +102,7 @@ module Hex : Sketch = struct
     chip_map = Coord_map.empty;
     undo = [];
     redo = [];
-    turn = CWhite;
+    mode = Game CWhite;
     winner = None;
   }
 
@@ -111,6 +116,7 @@ module Hex : Sketch = struct
   let color_of_chip = function
     | CWhite -> white
     | CBlack -> black
+    | CGray -> untaken_border
 
   let hex (m : measure) (xf : float) (yf : float) =
     poly [
@@ -166,7 +172,7 @@ module Hex : Sketch = struct
       match winner with
       | Some CWhite -> black_border, white
       | Some CBlack -> black, white_border
-      | None -> black_border, white_border in
+      | Some CGray | None -> black_border, white_border in
     let center = (~.(conf.width), ~.(conf.height)) // 2. in
     let reach = ~.(max conf.width conf.height) *. 2. in
     let theta_tl = pi *. 4. /. 3. in
@@ -237,11 +243,24 @@ module Hex : Sketch = struct
 
   let place_chip st chip x y =
     let chip_map = Coord_map.add (x, y) chip st.chip_map in
+    let prev_turn = match st.mode with
+      | Game chip -> chip
+      | Place chip -> chip in
     {
       st with
       chip_map;
-      undo = {x; y; chip; prev_turn = st.turn} :: st.undo;
+      undo = {x; y; chip; prev_turn} :: st.undo;
       redo = [];
+      winner = winner_of_chip_map st.measure.n chip_map;
+    }
+
+  let remove_chip st x y =
+    let chip_map = Coord_map.remove (x, y) st.chip_map in
+    let undo = List.filter (fun {x=x'; y=y'} -> (x, y) <> (x', y')) st.undo in
+    {
+      st with
+      chip_map;
+      undo;
       winner = winner_of_chip_map st.measure.n chip_map;
     }
 
@@ -249,12 +268,15 @@ module Hex : Sketch = struct
     match st.undo with
     | ({x; y; chip; prev_turn} as move) :: tl ->
       let chip_map = Coord_map.remove (x, y) st.chip_map in
+      let mode = match st.mode with
+        | Game _ -> Game prev_turn
+        | Place chip -> Place chip in
       {
         st with
         chip_map;
         undo = tl;
         redo = move :: st.redo;
-        turn = prev_turn;
+        mode;
         winner = winner_of_chip_map st.measure.n chip_map;
       }
     | [] -> st
@@ -263,12 +285,15 @@ module Hex : Sketch = struct
     match st.redo with
     | ({x; y; chip; prev_turn} as move) :: tl ->
       let chip_map = Coord_map.add (x, y) chip st.chip_map in
+      let mode = match st.mode with
+        | Game _ -> Game (next_turn prev_turn)
+        | Place chip -> Place chip in
       {
         st with
         chip_map;
         undo = move :: st.undo;
         redo = tl;
-        turn = next_turn prev_turn;
+        mode;
         winner = winner_of_chip_map st.measure.n chip_map;
       }
     | [] -> st
@@ -277,12 +302,16 @@ module Hex : Sketch = struct
     match hex_of_screen_coords st.measure ~.(conf.mouse_x) ~.(conf.mouse_y) with
     | Some (x, y) ->
       begin
-        (* can't place chips on top of other chips *)
-        match Coord_map.find_opt (x, y) st.chip_map with
-        | Some _ -> st
-        | None ->
-          let st' = place_chip st st.turn x y in
-          {st' with turn = next_turn st'.turn}
+        match st.mode, conf.mouse_button, Coord_map.find_opt (x, y) st.chip_map with
+        (* left click to place on open tiles *)
+        | Game chip, `Left, None ->
+          {(place_chip st chip x y) with mode = Game (next_turn chip)}
+        | Place chip, `Left, None ->
+          place_chip st chip x y
+        (* right click to remove *)
+        | Place _, `Right, Some _ ->
+          remove_chip st x y
+        | _ -> st
       end
     (* mouse was pressed outside board *)
     | None -> st
@@ -292,6 +321,17 @@ module Hex : Sketch = struct
     | k when k = KeyUnicode.backspace
           || k = KeyUnicode.left -> undo st
     | k when k = KeyUnicode.right -> redo st
+    | k when k = Uchar.of_char 'b' ->
+      {st with mode = Place CBlack}
+    | k when k = Uchar.of_char 'w' ->
+      {st with mode = Place CWhite}
+    | k when k = Uchar.of_char 'x' ->
+      {st with mode = Place CGray}
+    | k when k = Uchar.of_char 'g' ->
+      let mode = match st.mode with
+        | Game chip -> Game chip
+        | Place chip -> Game chip in
+      {st with mode}
     | _ -> st
 
   let window_resized conf st =
